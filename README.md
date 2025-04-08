@@ -10,4 +10,5 @@ This dataset contains brain activity recordings from 47 individuals who particip
 DX_GROUP → Diagnosis (1 = Autism, 2 = Control).
 AGE_AT_SCAN → Age at the time of the scan.
 SEX → Gender (1 = Male, 2 = Female).
+
 Questions for Analysis: Do brain connectivity patterns differ between individuals with Autism and the Control group?
