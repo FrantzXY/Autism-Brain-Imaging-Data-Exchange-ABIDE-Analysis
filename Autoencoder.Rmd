@@ -1,0 +1,409 @@
+
+
+```{r}
+library(keras)
+library(Rdimtools)
+library(ggplot2)
+library(scatterplot3d)
+library(gridExtra)
+library(plotly)
+
+load("~/STA437H1/ABIDE_YALE.RData") # load the dataset into the environment.
+
+# Descriptions for demo_var:
+
+# DX_GROUP → Diagnosis, (1 = Autism, 2 = Control).
+# AGE_AT_SCAN → Age, at the time of the scan.
+# SEX → Gender, (1 = Male, 2 = Female).
+
+```
+
+```{r}
+
+set.seed(437)
+
+YALE_fmri[[1]]
+
+length(YALE_fmri) # = 47
+
+dim(YALE_fmri[[1]]) # = 196 * 110
+
+```
+
+
+```{r}
+
+# Initialize an empty list to store the flattened connectivity vectors
+flattened_connectivity <- list()
+
+# Loop over each subject
+for (i in 1:length(YALE_fmri)) {  # for total 47 patients (samples)
+  
+  # ensure each 196 * 110 matrix for each subject is a matrix
+  subject_data <- as.matrix(YALE_fmri[[i]])
+  
+  # Compute the correlation matrix across brain regions (110 x 110)
+  corr_matrix <- cor(subject_data)
+  # This will reflect the brain connectivity patterns and that how much the     activity of two brain regions correlates over time for each patient of total   47 sample patients.
+  
+  # Extract upper triangle indices (excluding diagonal) 
+  upper_tri_indices <- upper.tri(corr_matrix, diag = FALSE)
+  # Note, upper.tri() returns logical mask (a matrix of TRUE and FALSE).
+  # Set diag = FALSE to exclude diagonal elements. 
+  # We only want non-diagnoal upper triangular because The lower triangle is a   mirror of the upper triangle. Also, tthe diagonal is always 1                 (self-correlation).
+  
+  # Flatten the upper triangle into a vector
+  flattened_vector <- corr_matrix[upper_tri_indices]
+  
+  # Store the flattened vector
+  flattened_connectivity[[i]] <- flattened_vector
+}
+
+# Combine all vectors into a matrix (rows = subjects, columns = features)
+connectivity_matrix <- do.call(rbind, flattened_connectivity)
+
+# Confirm the dimensions
+dim(connectivity_matrix)
+# Should be 47 x 5995
+## 47 is the subjects, 5995 is the dimension of connectivity between two distinct brain regions, or the number of upper triangular elements. 
+# (110 * 109) / 2 = 5995
+
+```
+
+
+```{r}
+
+set.seed(437)
+library(energy)
+
+X <- connectivity_matrix  # 47 x 5995
+Y <- as.numeric(YALE_demo_var$DX_GROUP)  # 1 or 2
+
+
+```
+
+
+
+```{r}
+
+set.seed(437)
+
+library(torch)
+
+# Define the autoencoder class
+Autoencoder <- nn_module(
+  initialize = function() {
+    self$encoder <- nn_sequential(
+      nn_linear(5995, 512),
+      nn_relu(),
+      nn_linear(512, 64),
+      nn_relu(),
+      nn_linear(64, 2)  # 2D embedding
+    )
+    
+    self$decoder <- nn_sequential(
+      nn_linear(2, 64),
+      nn_relu(),
+      nn_linear(64, 512),
+      nn_relu(),
+      nn_linear(512, 5995),
+      nn_tanh()  # Output in (-1, 1)
+    )
+  },
+  
+  forward = function(x) {
+    encoded <- self$encoder(x)
+    decoded <- self$decoder(encoded)
+    decoded
+  }
+)
+
+
+X_tensor <- torch_tensor(as.matrix(X), dtype = torch_float())
+dataset <- tensor_dataset(X_tensor, X_tensor)
+loader <- dataloader(dataset, batch_size = 16, shuffle = TRUE)
+
+model <- Autoencoder()
+optimizer <- optim_adam(model$parameters, lr = 0.001)
+num_epochs <- 25
+
+for (epoch in 1:num_epochs) {
+  model$train()
+  total_loss <- 0
+  
+  coro::loop(for (batch in loader) {
+    optimizer$zero_grad()
+    output <- model(batch[[1]])
+    loss <- nnf_mse_loss(output, batch[[2]])
+    loss$backward()
+    optimizer$step()
+    total_loss <- total_loss + loss$item()
+  })
+  
+  cat(sprintf("Epoch %d - Loss: %.6f\n", epoch, total_loss), "\n")
+}
+
+model$eval()
+with_no_grad({
+  embeddings <- model$encoder(X_tensor)
+  embeddings_matrix <- as_array(embeddings)
+})
+
+```
+
+```{r}
+
+model$eval()
+
+with_no_grad({
+  encoded_tensor <- model$encoder(X_tensor)
+  low_dim_embeddings <- as_array(encoded_tensor)  # convert to R matrix
+})
+
+embedding_df <- data.frame(
+  X1 = low_dim_embeddings[, 1],
+  X2 = low_dim_embeddings[, 2],
+  label = as.factor(Y)  # e.g., autism/control
+)
+
+
+library(ggplot2)
+
+ggplot(embedding_df, aes(x = X1, y = X2, color = label)) +
+  geom_point(size = 3, alpha = 0.7) +
+  labs(title = "2D Embedding from Autoencoder", x = "Dim 1", y = "Dim 2") +
+  theme_minimal()
+
+```
+
+
+```{r}
+t.test(X1 ~ label, data = embedding_df)  # insignificant
+
+library(effsize)
+cohen.d(embedding_df$X1 ~ embedding_df$label)  # small 
+```
+```{r}
+
+X1_ae <- as.matrix(embedding_df[, 1])
+Y <- as.numeric(embedding_df$label) 
+
+
+table(Y)     #Y                  1  2 
+             #                  21 26         
+## Thus, the Diagnosis's encoding is 1 for Control and 2 for Autism. 
+
+result = cor.test(X1_ae, Y, method = 'kendall')
+result$p.value
+result$estimate
+## p-value (0.005774032) of kendall test is highly statistically significant. 
+
+wilcox.test(X1_ae ~ Y)  ## p.value = 0.00519, significant
+
+```
+
+```{r}
+set.seed(437)
+
+library(glmnet)
+library(pROC)
+
+# Extract covariates and target variable from the full umap (3d) dataset
+X_ae2 <- as.matrix(embedding_df[, !names(embedding_df) %in% c("label")])
+Y_ae2 <- embedding_df$label
+
+# First CV to select lambda (Ridge or Lasso)
+
+# Ridge
+cv_ridge <- cv.glmnet(X_ae2, Y_ae2, alpha = 0, family = "binomial")
+best_lambda_ridge <- cv_ridge$lambda.min
+
+# Lasso
+cv_lasso <- cv.glmnet(X_ae2, Y_ae2, alpha = 1, family = "binomial")
+best_lambda_lasso <- cv_lasso$lambda.min
+
+# Elastic Net with alpha = 0.5
+cv_en <- cv.glmnet(X_ae2, Y_ae2, alpha = 0.5, family = "binomial")
+best_lambda_en <- cv_en$lambda.min
+```
+
+```{r}
+
+set.seed(437)
+
+itrain <- 11:42
+
+lasso_model = glmnet(X_ae2[itrain, ], Y_ae2[itrain], alpha = 1, family = 'binomial', lambda = best_lambda_lasso)
+
+assess.glmnet(lasso_model, newx = X_ae2[-itrain, ], newy = Y_ae2[-itrain])
+
+coef(lasso_model)
+
+```
+
+
+
+
+```{r}
+
+set.seed(437)
+
+## Autoencoder to 3D. 
+
+library(torch)
+
+# Define the autoencoder class
+Autoencoder3 <- nn_module(
+  initialize = function() {
+    self$encoder <- nn_sequential(
+      nn_linear(5995, 512),
+      nn_relu(),
+      nn_linear(512, 64),
+      nn_relu(),
+      nn_linear(64, 3)  # 3D embedding
+    )
+    
+    self$decoder <- nn_sequential(
+      nn_linear(3, 64),
+      nn_relu(),
+      nn_linear(64, 512),
+      nn_relu(),
+      nn_linear(512, 5995),
+      nn_tanh()  # Output in (-1, 1)
+    )
+  },
+  
+  forward = function(x) {
+    encoded <- self$encoder(x)
+    decoded <- self$decoder(encoded)
+    decoded
+  }
+)
+
+
+X_tensor <- torch_tensor(as.matrix(X), dtype = torch_float())
+dataset <- tensor_dataset(X_tensor, X_tensor)
+loader <- dataloader(dataset, batch_size = 16, shuffle = TRUE)
+
+model3 <- Autoencoder3()
+optimizer3 <- optim_adam(model3$parameters, lr = 0.001)
+num_epochs <- 27
+
+for (epoch in 1:num_epochs) {
+  model3$train()
+  total_loss3 <- 0
+  
+  coro::loop(for (batch in loader) {
+    optimizer3$zero_grad()
+    output3 <- model3(batch[[1]])
+    loss3 <- nnf_mse_loss(output3, batch[[2]])
+    loss3$backward()
+    optimizer3$step()
+    total_loss3 <- total_loss3 + loss3$item()
+  })
+  
+  cat(sprintf("Epoch for 3D %d - Loss: %.6f\n", epoch, total_loss3), "\n")
+}
+
+```
+
+
+```{r}
+
+model3$eval()
+
+with_no_grad({
+  encoded_tensor3 <- model3$encoder(X_tensor)
+  low_dim_embeddings3 <- as_array(encoded_tensor3)  # convert to R matrix
+})
+
+embedding_df3 <- data.frame(
+  X1 = low_dim_embeddings3[, 1],
+  X2 = low_dim_embeddings3[, 2],
+  X3 = low_dim_embeddings3[, 3],
+  label = as.factor(Y)  # e.g., autism/control
+)
+
+library(plotly)
+
+fig <- plot_ly(
+  data = embedding_df3,
+  x = ~ X1,
+  y = ~ X2,
+  z = ~ X3,
+  color = ~ label,
+  colors = c('red', 'cyan'), 
+  type = 'scatter3d',
+  mode = 'markers',
+  marker = list(size = 5, opacity = 0.8)
+)
+
+fig <- fig %>% layout(
+  title = "Autoencoder of Brain Functional Connectivity with 3 Components",
+  scene = list(
+    xaxis = list(title = "AE1"),
+    yaxis = list(title = "AE2"),
+    zaxis = list(title = "AE3")
+  )
+)
+
+fig
+
+```
+
+
+
+
+
+```{r}
+
+# Build Autoencoder
+
+library(keras)
+
+input_layer = layer_input(shape = c(5995))
+
+# Encoder
+encoder = input_layer %>%    ## Pass input to encoder layers.
+  layer_dense(units = 2048, activation = 'relu') %>% 
+  layer_dense(units = 1024, activation = 'relu') %>% 
+  layer_dense(units = 512, activation = 'relu') %>% 
+  layer_dense(units = 128, activation = 'relu') %>% 
+  layer_dense(units = 64, activation = 'relu') %>% 
+  layer_dense(units = 2, activation = 'linear')
+  
+# Decoder
+decoder = encoder %>%       ## Pass encoded stuff into decoder layers.
+  layer_dense(units = 64, activation = 'relu') %>% 
+  layer_dense(units = 128, activation = 'relu') %>% 
+  layer_dense(units = 512, activation = 'relu') %>% 
+  layer_dense(units = 1024, activation = 'relu') %>% 
+  layer_dense(units = 2048, activation = 'relu') %>% 
+  layer_dense(units = 5995, activation = 'tanh') # tanh for X(-1, 1)
+
+# Compile Autoencoder
+autoencoder <- keras_model(input_layer, decoder)
+
+autoencoder %>% compile(
+  optimizer = optimizer_adam(amsgrad = TRUE),
+  loss = loss_mean_squared_error()
+)
+
+
+## Train Autoencoder
+
+history <- autoencoder %>% fit(
+  X, X, epochs = 20, batch_size = 16
+)
+
+# Encoder Model for Dimensionality Reduction
+
+encoder_model <- keras_model(input_layer, encoder)  ## Select only encoder model for dimensional reduction purposes
+
+low_dim_embeddings <- encoder_model %>% predict(X)
+
+
+```
+
+
+

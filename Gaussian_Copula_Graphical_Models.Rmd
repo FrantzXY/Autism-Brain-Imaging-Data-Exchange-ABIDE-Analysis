@@ -1,0 +1,419 @@
+```{r}
+library(Rdimtools)
+library(ggplot2)
+library(scatterplot3d)
+library(gridExtra)
+library(plotly)
+
+load("~/STA437H1/ABIDE_YALE.RData") # load the dataset into the environment.
+
+# Descriptions for demo_var:
+
+# DX_GROUP → Diagnosis, (1 = Autism, 2 = Control).
+# AGE_AT_SCAN → Age, at the time of the scan.
+# SEX → Gender, (1 = Male, 2 = Female).
+
+```
+
+
+
+```{r}
+
+set.seed(437)
+
+YALE_fmri[[1]]
+
+length(YALE_fmri) # = 47
+
+dim(YALE_fmri[[1]]) # = 196 * 110
+
+```
+
+
+```{r}
+
+# Sigma (covariance matrix) will reflect the brain connectivity patterns and 
+# how much the activity of two brain regions correlates over time for 
+# each patient of total 47 sample patients.
+
+library(huge)
+
+# Initialize an empty list to store the flattened connectivity vectors
+flattened_connectivity <- list()
+
+# Loop over each subject
+for (i in 1:length(YALE_fmri)) {  # for total 47 patients (samples)
+
+  # Step 1: Extract subject's time-series matrix (196 x 110)
+  subject_data <- as.matrix(YALE_fmri[[i]])
+
+  # Step 2: Apply Gaussian copula (nonparanormal) transformation
+  # Note: "shrinkage" is used here because "skeptic" returns a correlation matrix,
+  # which disables EBIC. Only shrinkage or truncation return transformed data.
+  subject_data_npn <- huge.npn(subject_data, npn.func = "shrinkage")
+
+  # Step 3: Estimate sparse inverse covariance using Graphical Lasso
+  huge_result <- huge(subject_data_npn, method = "glasso")
+
+  # Next, Manually select a lambda index (e.g., index 10 gives moderate sparsity)
+  precision_matrix <- huge_result$icov[[2]]
+
+  # Safety: symmetrize the matrix
+  precision_matrix <- (precision_matrix + t(precision_matrix)) / 2
+
+  # Step 6: Extract upper triangle indices (excluding diagonal) 
+  # Note: upper.tri() returns logical mask (a matrix of TRUE and FALSE).
+  # Set diag = FALSE to exclude diagonal elements. 
+  # We only want non-diagnoal upper triangular because the lower triangle is a 
+  # mirror of the upper triangle. Also, the diagonal is always 1 (self-correlation).
+  upper_tri_indices <- upper.tri(precision_matrix, diag = FALSE)
+
+  # Flatten the upper triangle into a vector
+  flattened_vector <- precision_matrix[upper_tri_indices]
+
+  # Step 7: Store the flattened connectivity vector
+  flattened_connectivity[[i]] <- flattened_vector
+}
+
+# Step 8: Combine all vectors into a matrix (rows = subjects, columns = features)
+connectivity_matrix <- do.call(rbind, flattened_connectivity)
+
+# Confirm the dimensions
+dim(connectivity_matrix)
+
+# Should be 47 x 5995
+## 47 is the subjects, 5995 is the dimension of connectivity between two distinct brain regions,
+## or the number of upper triangular elements. (110 * 109) / 2 = 5995
+
+
+```
+
+
+
+
+```{r}
+
+set.seed(437)
+library(energy)
+
+X <- connectivity_matrix  # 47 x 5995
+Y <- as.numeric(YALE_demo_var$DX_GROUP)  # 1 or 2
+
+dcor.test(X, Y, R = 5000)
+
+
+```
+
+
+```{r}
+
+## PCA on connectivity_matrix and creation of PCA with demographic data frame
+
+pca_result = prcomp(connectivity_matrix) ## very very important to scale the matrix for PCA! # , scale. = TRUE
+
+pca_scores = pca_result$x
+
+summary(pca_result) 
+
+# Combine the PCA result on connectivity matrix with the demographic variables so that we can visualize our data. 
+
+pca_demo_df = data.frame(
+  PC1 = pca_scores[, 1],
+  PC2 = pca_scores[, 2],
+  Diagnosis = as.factor(YALE_demo_var$DX_GROUP),
+  Age = YALE_demo_var$AGE_AT_SCAN,
+  Sex = as.factor(YALE_demo_var$SEX)
+) 
+
+```
+
+```{r}
+
+t.test(PC1 ~ Diagnosis, data = pca_demo_df)
+t.test(PC2 ~ Diagnosis, data = pca_demo_df)
+
+# No true difference of PC1 values between two groups in Diagnosis.
+# Likewise for PC2.
+
+```
+
+
+```{r}
+
+# Plot the PCA Result
+
+library(ggplot2)
+
+ggplot(pca_demo_df, aes(x = PC1, y = PC2, color = Diagnosis)) +
+  geom_point(size = 3) +
+  labs(title = "PCA of Brain Functional Connectivity",
+       x = "First Pinciple Component", 
+       y = "Second Pinciple Component",
+       color = "Diagnosis of Autism \n (1 = Autism, 2 = Control)") +
+  theme_minimal()
+
+```
+
+
+```{r}
+
+explained_var <- round(100 * summary(pca_result)$importance[2, 1:2], 2)
+
+ggplot(pca_demo_df, aes(x = PC1, y = PC2, color = Diagnosis)) +
+  geom_point(size = 3, alpha = 0.8) +
+  labs(
+    title = "PCA Plot of the Brain Functional Connectivity",
+    x = paste0("First Pinciple Component (", explained_var[1], "% variance)"),
+    y = paste0("Second Pinciple Component (", explained_var[2], "% variance)"),
+    color = "Diagnosis\n(1 = Autism, 2 = Control)"
+  ) +
+  theme_minimal()
+
+```
+
+
+
+```{r}
+
+## Perform UMAP dimensional reduction with n_component is 3. 
+
+# UMAP intro website: https://cran.r-project.org/web/packages/umap/vignettes/umap.html
+
+
+library(umap)
+
+umap_result = umap(connectivity_matrix,  n_components = 3, random_state = 437, n_neighbors = 15, min_dist = 0.2)
+layout <- umap_result[["layout"]]
+# dim(layout)  ## 47, 3
+
+layout_df <- data.frame(layout)
+colnames(layout_df) <- c("UMAP1", "UMAP2", "UMAP3")
+
+umap_demo_df <- data.frame(
+  UMAP1 = layout_df$UMAP1,
+  UMAP2 = layout_df$UMAP2,
+  UMAP3 = layout_df$UMAP3,
+  Diagnosis = as.factor(YALE_demo_var$DX_GROUP),
+  Age = YALE_demo_var$AGE_AT_SCAN,
+  Sex = as.factor(YALE_demo_var$SEX)
+)
+
+umap_demo_df$Diagnosis <- factor(
+  umap_demo_df$Diagnosis,
+  levels = c(1, 2),
+  labels = c("Autism", "Control")
+)
+
+fig <- plot_ly(
+  data = umap_demo_df,
+  x = ~UMAP1,
+  y = ~UMAP2,
+  z = ~UMAP3,
+  color = ~Diagnosis,
+  colors = c('red', 'blue'), 
+  type = 'scatter3d',
+  mode = 'markers',
+  marker = list(size = 5, opacity = 0.8)
+)
+
+fig <- fig %>% layout(
+  title = "UMAP of Brain Functional Connectivity with 3 Components",
+  scene = list(
+    xaxis = list(title = "UMAP1"),
+    yaxis = list(title = "UMAP2"),
+    zaxis = list(title = "UMAP3")
+  )
+)
+
+fig  # display the plot
+
+```
+
+```{r}
+
+t.test(UMAP1 ~ Diagnosis, data = umap_demo_df)
+
+# There’s a statistically significant difference between the Autism and Control groups on the UMAP1 axis.
+
+t.test(UMAP2 ~ Diagnosis, data = umap_demo_df)
+t.test(UMAP3 ~ Diagnosis, data = umap_demo_df)
+
+library(effsize)
+cohen.d(umap_demo_df$UMAP1 ~ umap_demo_df$Diagnosis)
+
+# A Cohen’s d of -0.76 suggests:
+
+# There’s a meaningful difference between Autism and Control groups on UMAP1.
+# The magnitude is medium-to-large, showing practical significance, not just statistical.
+
+```
+
+```{r}
+
+head(umap_demo_df)
+
+```
+
+
+```{r}
+
+#> sum(umap_demo_df$Diagnosis== 'Control')
+#  [1] 26
+## So there are in total 26 control cases, 21 Autism case.
+
+
+set.seed(437)
+X_umap <- as.matrix(umap_demo_df[, 1])
+Y <- as.numeric(umap_demo_df$Diagnosis) 
+
+
+table(Y)     #Y                  1  2 
+             #                  21 26         
+## Thus, the Diagnosis's encoding is 1 for Control and 2 for Autism. 
+
+result = cor.test(X_umap, Y, method = 'kendall')
+result$p.value   #  Tau (0.3019804) is positive, meaning concordant cases are dominant between X_umap and Y. Thus, we can see that as X_umap increases, Y tends to increases. In other word, X_umap large values then to suggest Autism.
+
+result$estimate  
+## p-value (0.01305846) of kendall test is statistically significant. 
+
+
+wilcox.test(X_umap ~ Y)
+
+```
+
+
+```{r}
+
+# Fit a binary logistic regression on 3d-umap data with two groups to be response, and 3 variable data to be predictors
+
+set.seed(437)
+
+library(glmnet)
+library(pROC)
+
+# Extract covariates and target variable from the full umap (3d) dataset
+X_umap3 <- as.matrix(umap_demo_df[, !names(umap_demo_df) %in% c("Diagnosis")])
+Y_umap3 <- umap_demo_df$Diagnosis
+
+# First CV to select lambda (Ridge or Lasso)
+
+# Ridge
+cv_ridge <- cv.glmnet(X_umap3, Y_umap3, alpha = 0, family = "binomial")
+best_lambda_ridge <- cv_ridge$lambda.min
+
+# Lasso
+cv_lasso <- cv.glmnet(X_umap3, Y_umap3, alpha = 1, family = "binomial")
+best_lambda_lasso <- cv_lasso$lambda.min
+
+# Elastic Net with alpha = 0.5
+cv_en <- cv.glmnet(X_umap3, Y_umap3, alpha = 0.5, family = "binomial")
+best_lambda_en <- cv_en$lambda.min
+
+```
+
+```{r}
+
+itrain <- 11:39
+
+lasso_model = glmnet(X_umap3[itrain, ], Y_umap3[itrain], alpha = 1, family = 'binomial', lambda = best_lambda_lasso)
+
+assess.glmnet(lasso_model, newx = X_umap3[-itrain, ], newy = Y_umap3[-itrain])
+
+
+## Misclassification rate is 0.2778. AUC is 0.7375. Not bad.
+
+## This lasso glm model shows that the brain connectivity (as measured through correlation patterns) data after umap dimensionality reduction differs enough between groups to be statistical diagnostically.
+
+## We have similar performance between LASSO and Elastic Net. The ridge is the worst among three.
+
+```
+
+```{r}
+# Coef interpretation for lasso LR
+
+coef(lasso_model)
+
+## Encoding of Y_umap3
+## > unique(Y_umap3)
+##[1] Control Autism
+## So Control is 0 (reference group), Autism in 1 (target group). 
+
+## The GLM models P(Y = 1 | X) = P(autism | UMAP features)
+
+## A positive coefficient means: as that UMAP value increases, the log-odds of autism increases (i.e., more likely autistic).
+
+##  One-unit increase in UMAP1 increases the log-odds of autism by 1.5. In other word, higher brain connectivity tends to be autism, agreeing to the kendall test. 
+
+```
+
+
+
+```{r}
+
+ridge_model = glmnet(X_umap3[itrain, ], Y_umap3[itrain], alpha = 0, family = "binomial", lambda = best_lambda_ridge)
+
+assess.glmnet(ridge_model, newx = X_umap3[-itrain, ], newy = Y_umap3[-itrain])
+
+```
+
+
+```{r}
+
+en_model = glmnet(X_umap3[itrain, ], Y_umap3[itrain], alpha = 0.5, family = "binomial", lambda = best_lambda_en)
+
+assess.glmnet(lasso_model, newx = X_umap3[-itrain, ], newy = Y_umap3[-itrain])
+
+```
+
+```{r}
+
+coef(en_model)
+
+## Elastic net Model is the same with LASSO model, so same interpretation. Larger Umap (brain connectivity) values in first component tends to reault more in Autism group than in Conrol group.
+
+```
+
+
+
+```{r}
+
+# UMAP with 2 components
+
+umap2_result = umap(connectivity_matrix)
+layout2 <- umap2_result[["layout"]]
+# dim(layout)  ## 47, 2
+
+layout2_df <- data.frame(layout2)
+colnames(layout2_df) <- c("UMAP1", "UMAP2")
+
+umap2_demo_df <- data.frame(
+  UMAP1 = layout2_df$UMAP1,
+  UMAP2 = layout2_df$UMAP2,
+  Diagnosis = as.factor(YALE_demo_var$DX_GROUP),
+  Age = YALE_demo_var$AGE_AT_SCAN,
+  Sex = as.factor(YALE_demo_var$SEX)
+)
+
+ggplot(umap2_demo_df, aes(x = UMAP1, y = UMAP2, color = Diagnosis)) +
+  geom_point(size = 3, alpha = 0.8) +
+  labs(
+    title = "UMAP of Brain Functional Connectivity",
+    subtitle = "UMAP based on connectivity_matrix",
+    color = "Diagnosis\n(1 = Autism, 2 = Control)"
+  ) +
+  theme_minimal()
+
+
+```
+
+
+```{r}
+
+t.test(UMAP1 ~ Diagnosis, data = umap2_demo_df)
+
+```
+
+
+
+
