@@ -39,6 +39,7 @@ flattened_connectivity <- list()
 for (i in 1:length(YALE_fmri)) {  # for total 47 patients (samples)
   
   # ensure each 196 * 110 matrix for each subject is a matrix
+  # The matrix has 196 timepoints (rows), and 110 brain regions (columns)
   subject_data <- as.matrix(YALE_fmri[[i]])
   
   # Compute the correlation matrix across brain regions (110 x 110)
@@ -46,8 +47,7 @@ for (i in 1:length(YALE_fmri)) {  # for total 47 patients (samples)
   # This will reflect the brain connectivity patterns and that how much the     activity of two brain regions correlates over time for each patient of total   47 sample patients.
   
   lambda_opt = 0.5
-  ## Best, when lambda_opt = 0.5,
-  ## lambda_opt = 0.9, test significant, but LR bad. 
+  ## 0.5, a classical choice to balance shrinkage. 
   
   corr_matrix = glasso(corr_matrix, rho = lambda_opt)$w
   
@@ -55,14 +55,17 @@ for (i in 1:length(YALE_fmri)) {  # for total 47 patients (samples)
   upper_tri_indices <- upper.tri(corr_matrix, diag = FALSE)
   # Note, upper.tri() returns logical mask (a matrix of TRUE and FALSE).
   # Set diag = FALSE to exclude diagonal elements. 
+  ## No need for duplicates (since [i, j] = [j, i])
+  ## Ignore diagonals (which are all 1s)
   # We only want non-diagnoal upper triangular because The lower triangle is a   mirror of the upper triangle. Also, tthe diagonal is always 1                 (self-correlation).
   
   # Flatten the upper triangle into a vector
-  flattened_vector <- corr_matrix[upper_tri_indices]
+  flattened_vector <- corr_matrix[upper_tri_indices]   ## since upper.tri() returns logical mask (a matrix of TRUE and FALSE)
   
   # Store the flattened vector
-  flattened_connectivity[[i]] <- flattened_vector
+  flattened_connectivity[[i]] <- flattened_vector 
 }
+
 
 # Combine all vectors into a matrix (rows = subjects, columns = features)
 connectivity_matrix <- do.call(rbind, flattened_connectivity)
@@ -112,6 +115,11 @@ pca_demo_df = data.frame(
   Age = YALE_demo_var$AGE_AT_SCAN,
   Sex = as.factor(YALE_demo_var$SEX)
 ) 
+
+
+## PCA performs not well, two principle component explain 22.122% of total variation, and three principle component explain 27.208% of total variation.
+
+## We should try other dimensional reduction techniques, such as UMAP. 
 
 ```
 
@@ -245,13 +253,91 @@ fig  # display the plot
 
 ```
 
+
+```{r}
+
+# Explore the association between original dataset and the UMAP reducted data.
+
+## 1. Combine UMAP with original connectivity matrix
+combined_data <- cbind(layout_df, connectivity_matrix)
+
+## 2. Correlate UMAP1 with all 5995 features
+cor_umap1 <- apply(connectivity_matrix, 2, function(x) cor(x, layout_df$UMAP1, method = "kendall"))
+
+## 3. Repeat for UMAP2 and UMAP3
+cor_umap2 <- apply(connectivity_matrix, 2, function(x) cor(x, layout_df$UMAP2, method = "kendall"))
+cor_umap3 <- apply(connectivity_matrix, 2, function(x) cor(x, layout_df$UMAP3, method = "kendall"))
+
+## 4. Optional: create a data frame for easy inspection
+cor_df <- data.frame(
+  Feature = 1:5995,
+  UMAP1 = cor_umap1,
+  UMAP2 = cor_umap2,
+  UMAP3 = cor_umap3
+)
+
+## 5. Sort and view top contributing features for each UMAP axis
+
+# Brain Region ID for UMAP1
+head(cor_df[order(abs(cor_df$UMAP1), decreasing = TRUE), ])  
+# Brain Region ID for UMAP2
+head(cor_df[order(abs(cor_df$UMAP2), decreasing = TRUE), ])
+# Brain Region ID for UMAP3
+head(cor_df[order(abs(cor_df$UMAP3), decreasing = TRUE), ])
+
+## ID 2430 for UMAP1, Negative correlation
+## ID 5659 for UMAP2, Positive correlation
+## ID 4723 for UMAP3, Negative correlation
+
+```
+
+
+```{r}
+
+## Recover brain region ID (total 110 regions) from the correlation matrix feature ID (total 5995 features)
+
+
+## flattened_vector <- corr_matrix[upper.tri(corr_matrix, diag = FALSE)]
+## This extracts only the upper triangle of a symmetric matrix (i < j)
+## The values are extracted in column-major order (column by column).
+
+# Feature 1 is the correlation between region 1 and 2
+# Feature 2 is region 1 and 3
+# Feature 5995 is region 109 and 110
+
+get_region_pair <- function(k, n = 110) {
+  # Create an empty matrix with upper triangle indices
+  mat <- matrix(0, n, n) ## Creates an empty 110 × 110 zero matrix
+  mat[upper.tri(mat)] <- 1:((n * (n - 1)) / 2)
+  ## reconstruct the upper triangular matrix with values 1 to 5995
+  ##     R1    R2    R3    R4    R5  ... 
+## R1    0     1     2     3     4   ...
+## R2    0     0     5     6     7   ...
+## R3    0     0     0     8     9   ...
+## R4    0     0     0     0    10   ...
+  
+  # Find the position where the index matches
+  pos <- which(mat == k, arr.ind = TRUE)
+  ## searches the matrix for where the value equals k
+  
+  return(pos)
+  ## Returns the matrix indices (row and column), which correspond to the brain regions i and j
+}
+
+get_region_pair(2430)  ## Brain connectivity bewteen 15 and 71
+get_region_pair(5659)  ## Brain connectivity between 94 and 107
+get_region_pair(4723)  ## Brain connectivity beween 67 and 98
+
+```
+
+
+
 ```{r}
 
 set.seed(437)
 
 t.test(UMAP1 ~ Diagnosis, data = umap_demo_df)
 
-# There’s a statistically significant difference between the Autism and Control groups on the UMAP1 axis.
 set.seed(437)
 
 t.test(UMAP2 ~ Diagnosis, data = umap_demo_df)
@@ -259,13 +345,17 @@ t.test(UMAP2 ~ Diagnosis, data = umap_demo_df)
 set.seed(437)
 t.test(UMAP3 ~ Diagnosis, data = umap_demo_df)
 
+# There’s no statistically significant difference between the Autism and Control groups on the UMAP1 and UMAP3 axis.
+
+## But, there is significant result for UMAP2 axis (Brain connectivity between 94 and 107). UMAP2 has Positive correlation with the brain connection ID between 94 and 107.
+
 library(effsize)
 cohen.d(umap_demo_df$UMAP2 ~ umap_demo_df$Diagnosis)
 
-# A Cohen’s d of -0.76 suggests:
+# A Cohen’s d of  0.9550438 suggests:
 
-# There’s a meaningful difference between Autism and Control groups on UMAP1.
-# The magnitude is medium-to-large, showing practical significance, not just statistical.
+# There’s a meaningful difference between Autism and Control groups on UMAP2.
+# The magnitude is large, showing practical significance, not just statistical.
 
 ```
 
@@ -284,7 +374,7 @@ head(umap_demo_df)
 
 
 set.seed(437)
-X_umap <- as.matrix(umap_demo_df[, 2])
+X_umap <- as.matrix(umap_demo_df[, 2])  ## Select the second UMAP component
 Y <- as.numeric(umap_demo_df$Diagnosis) 
 
 
@@ -293,13 +383,17 @@ table(Y)     #Y                  1  2
 ## Thus, the Diagnosis's encoding is 1 for Control and 2 for Autism. 
 
 result = cor.test(X_umap, Y, method = 'kendall')
-result$p.value   #  Tau (0.3019804) is positive, meaning concordant cases are dominant between X_umap and Y. Thus, we can see that as X_umap increases, Y tends to increases. In other word, X_umap large values then to suggest Autism.
+result$p.value   
+
+#  Tau (-0.3670624) is negative, meaning disconcordant cases are dominant between X_umap and Y. Thus, we can see that as X_umap increases, Y tends to decreases. In other word, X_umap large values then to suggest not Autism.
+
+## Thus, we can see that as brain region connection between 94 and 107 grows larger, we tend to so no Autism.
 
 result$estimate  
-## p-value (0.01305846) of kendall test is statistically significant. 
+## p-value (0.002551875) of kendall test is statistically significant. 
 
 
-wilcox.test(X_umap ~ Y)
+wilcox.test(X_umap ~ Y)  ## Wilcox test is also significant. 
 
 ```
 
@@ -345,7 +439,7 @@ lasso_model = glmnet(X_umap3[itrain, ], Y_umap3[itrain], alpha = 1, family = 'bi
 assess.glmnet(lasso_model, newx = X_umap3[-itrain, ], newy = Y_umap3[-itrain])
 
 
-## Misclassification rate is 0.2778. AUC is 0.7375. Not bad.
+## Misclassification rate is 0.2778. AUC is 0.6875. Not too bad.
 
 ## This lasso glm model shows that the brain connectivity (as measured through correlation patterns) data after umap dimensionality reduction differs enough between groups to be statistical diagnostically.
 
@@ -365,9 +459,9 @@ coef(lasso_model)
 
 ## The GLM models P(Y = 1 | X) = P(autism | UMAP features)
 
-## A positive coefficient means: as that UMAP value increases, the log-odds of autism increases (i.e., more likely autistic).
+## A negative coefficient means: as that UMAP value increases, the log-odds of autism decreases (less likely to be autistic).
 
-##  One-unit increase in UMAP1 increases the log-odds of autism by 1.5. In other word, higher brain connectivity tends to be autism, agreeing to the kendall test. 
+##  One-unit increase in UMAP2 (higher positive Brain connectivity between 94 and 107) decreases the log-odds of autism by 0.8209. In other word, higher brain connectivity tends to be autism, agreeing to the kendall test. 
 
 ```
 
@@ -434,7 +528,8 @@ ggplot(umap2_demo_df, aes(x = UMAP1, y = UMAP2, color = Diagnosis)) +
 
 ```{r}
 
-t.test(UMAP1 ~ Diagnosis, data = umap2_demo_df)
+t.test(UMAP1 ~ Diagnosis, data = umap2_demo_df)  ## UMAP1 component is significant with p-value = 0.03124.
+t.test(UMAP2 ~ Diagnosis, data = umap2_demo_df)  ## not for UMAP2
 
 ```
 
