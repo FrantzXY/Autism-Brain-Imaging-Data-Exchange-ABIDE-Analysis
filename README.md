@@ -11,4 +11,8 @@ DX_GROUP → Diagnosis (1 = Autism, 2 = Control).
 AGE_AT_SCAN → Age at the time of the scan.
 SEX → Gender (1 = Male, 2 = Female).
 
-Questions for Analysis: Do brain connectivity patterns differ between individuals with Autism and the Control group?
+Questions for Analysis: 
+
+Do brain connectivity patterns differ between individuals with Autism and the Control group?
+
+Are there specific brain regions that show different activity between groups?
