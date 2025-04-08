@@ -1,5 +1,6 @@
 # Autism-Brain-Imaging-Data-Exchange-ABIDE-Analysis
-Method of Multivariate Data Analysis (STA437H1) Final Project
+Method of Multivariate Data Analysis (STA437H1) Final Project.
+
 This dataset contains brain activity recordings from 47 individuals who participated in a study at Yale University. The data come from functional MRI (fMRI) scans, which measure brain activity over time. Each subject has a matrix (196 × 110) representing their brain activity.
 
 196 → The number of time points recorded during the scan.
