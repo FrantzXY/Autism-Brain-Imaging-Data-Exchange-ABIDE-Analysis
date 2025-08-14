@@ -1,5 +1,6 @@
 # Autism-Brain-Imaging-Data-Exchange-ABIDE-Analysis
 Method of Multivariate Data Analysis (STA437H1) Final Project.
+Course website: https://pzwiernik.github.io/sta437/
 
 Data Link: https://drive.google.com/drive/folders/1ai5mjIR2NeQJfDv9eaJ36mjgF8XvvTZQ
 
